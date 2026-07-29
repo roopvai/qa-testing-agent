@@ -33,7 +33,7 @@ def decide_next_action(image_path: str, goal: str, history: list) -> AgentAction
 
     body = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 500,
+        "max_tokens": 800,
         "system": system,
         "messages": [
             {
@@ -49,11 +49,24 @@ def decide_next_action(image_path: str, goal: str, history: list) -> AgentAction
     response = bedrock.invoke_model(modelId=get_secret("BEDROCK_MODEL_ID"), body=json.dumps(body))
     result = json.loads(response["body"].read())
     raw = result["content"][0]["text"].strip()
+
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-    return AgentAction(**json.loads(raw.strip()))
+    raw = raw.strip()
+
+    try:
+        return AgentAction(**json.loads(raw))
+    except json.JSONDecodeError:
+        print(f"WARNING: Claude returned non-JSON output, treating as finish. Raw output was:\n{raw}")
+        return AgentAction(
+            action="finish",
+            target_text=None,
+            value=None,
+            reasoning=f"Could not parse model output as JSON — stopping safely. Raw: {raw[:200]}",
+            step_result=None,
+        )
 
 
 def execute_action(page, frame, action: AgentAction) -> str:
