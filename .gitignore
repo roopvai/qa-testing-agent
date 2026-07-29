@@ -1,0 +1,8 @@
+venv/
+.env
+__pycache__/
+*.pyc
+step_*.png
+debug_load.png
+screenshot.png
+*.docx
