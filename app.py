@@ -1,3 +1,10 @@
+import subprocess
+
+try:
+    subprocess.run(["playwright", "install", "chromium"], check=True)
+except Exception as e:
+    print(f"Playwright install warning: {e}")
+
 import streamlit as st
 from src.agent import run_agent
 
