@@ -3,7 +3,7 @@
 
 An AI agent that takes a software requirements document (`.docx`) and automatically generates **test cases**, **edge cases**, and **quality risk flags** — grounded with RAG so output reflects real testing standards and past examples instead of generic LLM guesses.
 
-**[Live Demo](#)** · **[Report a bug](#)**
+**[Live Demo](https://app-testing-agent.streamlit.app/)** · **[Report a bug](#)**
 
 ---
 
