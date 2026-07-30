@@ -1,113 +1,83 @@
+# Autonomous QA Testing Agent
 
-# AI Test Case & Quality Risk Generator
+An AI agent that autonomously tests a live web application by actually using it — driving a real browser, deciding its own next actions from what it sees on screen, and reporting what it did. Built as a natural extension of my [AI Test Case & Quality Risk Generator](https://github.com/roopvai/srs-test-agent): that project generates test coverage from requirements, this one executes it.
 
-An AI agent that takes a software requirements document (`.docx`) and automatically generates **test cases**, **edge cases**, and **quality risk flags** — grounded with RAG so output reflects real testing standards and past examples instead of generic LLM guesses.
-
-**[Live Demo](https://app-testing-agent.streamlit.app/)** · **[Report a bug](https://github.com/roopvai/srs-test-agent/issues)**
+**[Live Demo](https://app-testing-agent.streamlit.app/)** · **[Report a bug](https://github.com/roopvai/qa-testing-agent/issues)**
 
 ---
-
-## The problem
-
-QA teams spend a large amount of time manually translating requirements documents into test cases. This process is inconsistent between engineers, prone to missed edge cases, and doesn't catch quality problems in the requirements themselves — ambiguity, missing acceptance criteria, untestable language — until much later, when they're expensive to fix.
-
-This project explores whether an LLM agent, grounded with retrieval, can generate a strong first draft of test coverage and flag requirement-quality risks early, while keeping a human in the loop for final review.
 
 ## How it works
 
 ```
-SRS Document (.docx)
-        │
-        ▼
-  Parse & chunk into individual requirement units
-        │
-        ▼
-  For each requirement:
-        │
-        ├──► Embed requirement (Amazon Titan Embeddings)
-        │           │
-        │           ▼
-        │    Retrieve similar context from knowledge base (Pinecone)
-        │           │
-        ▼           ▼
-  ┌─────────────────────────────────────────────┐
-  │  Three independent generation passes          │
-  │  (each with its own prompt + retrieval)       │
-  │                                                │
-  │  1. Test Cases   — coverage-focused           │
-  │  2. Edge Cases   — adversarial, boundary/fail │
-  │  3. Quality Risks — ambiguity, conflicts,     │
-  │                     untestable requirements   │
-  └─────────────────────────────────────────────┘
-        │
-        ▼
-  Structured JSON validated against Pydantic schemas
-        │
-        ▼
-  Streamlit UI — tables + CSV export
+Target URL + testing goal (e.g. "upload this file and confirm it processes")
+        |
+        v
+Playwright launches a real headless browser, navigates to the target
+        |
+        v
+   Agent loop (repeats until goal is met or max steps reached)
+        |
+        +--> Screenshot the current page state
+        +--> Send screenshot + goal + action history to Claude (vision, via Bedrock)
+        +--> Claude returns a single structured next action (JSON, schema-validated)
+        +--> Playwright executes that action (click, type, upload file, wait, finish)
+        +--> Result recorded, loop continues
+        |
+        v
+Full run history -> downloadable Markdown QA report with reasoning per step
 ```
 
-**Why three separate passes instead of one prompt?** Each task requires a different mode of reasoning. Test case generation is about coverage. Edge case generation is adversarial ("what would break this") and is given the already-generated test cases so it avoids duplicating them. Quality risk analysis needs the *whole document* as context (not just retrieved examples) to catch cross-requirement conflicts. Splitting these into focused passes with tailored prompts and retrieval produced noticeably better output than asking for everything in a single call.
+**Why structured JSON actions instead of free-text instructions?** The same lesson from my SRS project: an LLM's prose description of what it would do isn't something code can act on reliably. Forcing a schema-validated action (`click`, `type`, `upload_file`, `wait`, `finish`) with a specific target and reasoning turns "the model has an opinion" into "the model issues a command the browser can actually execute."
 
-**Why RAG?** A raw LLM call produces plausible but generic test cases. The knowledge base is seeded with testing heuristics (boundary-value analysis, negative testing conventions), past requirement/test-case pairs, and historical defect patterns — so generated output is grounded in what "good" looks like for this domain, and can be updated incrementally as conventions evolve, without retraining anything.
+**Why let the agent decide when it's done, rather than a fixed script?** A hardcoded test script only knows how to check for the outcome it was told to expect. Here, Claude evaluates the actual screenshot at each step and decides for itself whether the goal was met — in testing, it correctly recognized "Found 49 requirements" appearing on screen as goal completion, without that exact string being hardcoded anywhere in the stopping logic.
 
 ## Stack
 
 | Layer | Technology |
 |---|---|
-| LLM inference | Amazon Bedrock (Claude) |
-| Embeddings | Amazon Titan Embeddings v2 |
-| Vector database | Pinecone |
-| Schema validation | Pydantic |
-| Document parsing | python-docx |
+| Browser automation | Playwright (Python) |
+| Reasoning / vision | Amazon Bedrock (Claude) |
+| Action schema validation | Pydantic |
 | UI | Streamlit |
 | Hosting | Streamlit Community Cloud |
 
-## Validation
+## Real debugging challenges solved along the way
 
-Rather than just eyeballing output, the system was tested with a self-designed check: a 49-requirement sample SRS document included two deliberately vague, untestable requirements planted on purpose (e.g., *"the system should make user management easy and intuitive for administrators"*).
+This project surfaced a distinct set of problems from a typical API-only GenAI app, since it involves actually controlling a browser against a real, evolving web page:
 
-**Result:** the quality-risk pass correctly flagged the planted requirement as `untestable` in 5 separate detections, each with a distinct, specific rationale (subjective language, missing measurable criteria, non-mandatory "should" vs. "shall" phrasing).
+- **Streamlit Cloud's iframe wrapping.** Deployed Streamlit apps render inside an iframe within Streamlit Cloud's own outer chrome (fork button, viewer controls). Playwright's default locators only search the top-level page, so every selector silently found nothing until I diagnosed the iframe structure directly and switched to `frame_locator` to target the app's actual content frame.
+- **Cold-start timing.** Free-tier cloud apps can take 20-60+ seconds to wake up from sleep. A fixed wait timeout is a guess; I replaced it with active polling — repeatedly checking for real page content (not just a fixed delay) before starting the agent loop.
+- **Deploying Playwright itself to the cloud.** Unlike a pure API-calling app, this one needs an actual browser binary. Streamlit Cloud's default environment doesn't include one — solved with a `packages.txt` for system-level dependencies plus a runtime `playwright install chromium` step at app startup.
+- **Graceful handling of malformed model output.** Occasionally Claude's JSON response gets truncated mid-object (usually when its reasoning ran long against the token limit). Rather than let this crash the whole run, the agent catches the parse failure and falls back to a safe `finish` action — the run completes cleanly and the raw output is preserved for debugging, instead of the entire app crashing on one bad response.
 
-The system also caught issues that weren't deliberately planted, including:
-- A user-enumeration security gap (distinct "email not found" vs. "wrong password" error messages)
-- Cross-requirement role-definition conflicts between separate sections of the document
-- Missing malware/MIME-type validation on file upload requirements
+## Sample output
 
-Sample output: [`/samples`](./samples) contains the generated test cases, edge cases, and quality risks CSVs from a full run against the included sample SRS document.
+[`/samples`](./samples) contains a full run report generated against my SRS Test Agent project — uploading a sample requirements document and confirming successful processing, entirely autonomously.
 
 ## Getting started
 
 ### Prerequisites
-- Python 3.11 (3.13 has known compatibility issues with some dependencies used here, e.g. `orjson`)
-- An AWS account with Amazon Bedrock model access enabled (Anthropic Claude + Titan Embeddings)
-- A Pinecone account (free tier is sufficient)
+- Python 3.11
+- An AWS account with Amazon Bedrock model access enabled
 
 ### Setup
 
 ```bash
-git clone https://github.com/roopvai/srs-test-agent.git
-cd srs-test-agent
-
+git clone https://github.com/roopvai/qa-testing-agent.git
+cd qa-testing-agent
 python3.11 -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
-
+source venv/bin/activate
 pip install -r requirements.txt
+playwright install chromium
 ```
 
-Create a `.env` file in the project root:
-
+Create a `.env` file:
 ```
 AWS_ACCESS_KEY_ID=your_access_key
 AWS_SECRET_ACCESS_KEY=your_secret_key
 AWS_REGION=us-east-1
-PINECONE_API_KEY=your_pinecone_key
-PINECONE_INDEX_NAME=srs-agent-kb
 BEDROCK_MODEL_ID=us.anthropic.claude-sonnet-4-20250514-v1:0
-EMBED_MODEL_ID=amazon.titan-embed-text-v2:0
 ```
-
-Create a Pinecone index named to match `PINECONE_INDEX_NAME`, with dimension `1024` (matching Titan Embeddings v2) and cosine similarity metric.
 
 ### Run locally
 
@@ -115,37 +85,32 @@ Create a Pinecone index named to match `PINECONE_INDEX_NAME`, with dimension `10
 streamlit run app.py
 ```
 
-Open `http://localhost:8501`, upload an `.docx` requirements document, and click **Analyze**.
+Open `http://localhost:8501`, enter a target URL and testing goal, optionally upload a file the goal references, and click **Run Agent**.
 
 ## Project structure
 
 ```
-srs-test-agent/
-├── app.py                  # Streamlit UI and orchestration loop
+qa-testing-agent/
+├── app.py                  # Streamlit UI, drives the agent as a live generator
 ├── src/
-│   ├── bedrock_client.py   # Bedrock InvokeModel wrapper
-│   ├── vectorstore.py      # Embedding + Pinecone upsert/retrieve
-│   ├── ingestion.py        # .docx parsing
-│   ├── chunking.py         # Splits document into requirement units
-│   ├── schemas.py          # Pydantic models for structured output
-│   ├── prompts.py          # System prompts for each generation pass
-│   ├── generators.py       # Retrieval + generation logic per pass
-│   └── config.py           # Local .env / Streamlit Cloud secrets bridge
-├── samples/                # Sample SRS input + generated output
+│   ├── agent.py             # Core agent loop: screenshot -> reason -> act -> repeat
+│   ├── schemas.py           # Pydantic schema for structured agent actions
+│   ├── prompts.py           # System prompt enforcing structured JSON output
+│   ├── vision_agent.py      # Standalone Claude vision call (early prototype/testbed)
+│   └── config.py            # Local .env / Streamlit Cloud secrets bridge
+├── samples/                 # Sample run report
+├── packages.txt             # System-level dependencies for Playwright on Streamlit Cloud
 └── requirements.txt
 ```
 
 ## Known limitations & next steps
 
-This was built as a working prototype to validate the approach, not a production system. Known gaps and what I'd address next:
-
-- **Chunking is regex-based** and depends on consistent requirement numbering in the source document. A more robust version would use an LLM call to semantically segment requirements, rather than relying on formatting patterns.
-- **No formal evaluation harness yet.** Validation so far is the planted-ambiguity test described above. Next step: a golden dataset of requirements paired with human-approved test cases, scored for precision/recall, to benchmark prompt and retrieval changes objectively.
-- **Sequential processing.** Each requirement is processed one at a time (3 Bedrock calls each), which is slow for large documents. A production version would batch or parallelize calls with rate-limit-aware concurrency.
-- **No human-in-the-loop review gate yet** in the UI itself — low-confidence or borderline outputs should route to a reviewer queue rather than being treated identically to high-confidence output.
-- **Single shared knowledge base.** A multi-tenant/consulting deployment would need per-client knowledge base isolation.
+- **Only confirms task completion, doesn't yet hunt for bugs.** The agent currently verifies a goal was reached; a more complete QA tool would also actively probe for broken states — error messages, unexpected layouts, failed validations — rather than only checking the happy path.
+- **Tested primarily against one well-behaved target app.** Next step: run it against a deliberately trickier target (e.g. a public QA practice sandbox) to validate it generalizes beyond an app it was built alongside.
+- **No retry/self-correction when an action fails.** If a click or upload fails, the agent currently just logs the failure and lets the next reasoning step decide what to do — a more robust version would have explicit retry logic with a different strategy on failure.
+- **Sequential, single-session runs only.** No batch mode yet for running multiple goals or multiple target apps in one session.
 
 ## License
 
 MIT
-EOF
+
